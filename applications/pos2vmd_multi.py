@@ -555,6 +555,41 @@ def read_positions_multi(position_file):
     f.close()
     return positions
 
+
+# フレームレート変換 （線形補間によるリサンプリング）
+def convert_frame_rate(pos, orig_fps, new_fps, is_depth=False):
+    pos_resampling = []
+    frame_new = int(len(pos)*new_fps/orig_fps)
+    for i in range(frame_new):
+        t = i * orig_fps / new_fps
+        t0 = int(t)
+        alpha = t - t0
+        t1 = t0 + 1
+
+        if t0 >= len(pos): # 通常Trueにならないが、念のため
+            t0 = len(pos) - 1
+        if t1 >= len(pos):
+            t1 = len(pos) - 1
+
+        inposition = []
+        for j, (v0, v1) in enumerate(zip(pos[t0], pos[t1])):
+            # depthファイルの１列目の場合、補間の代わりに等間隔でカウントアップする
+            if is_depth and j == 0:
+                if i == 0:
+                    v = 0
+                else:
+                    v = (pos[1][0] - pos[0][0]) * i
+
+            else:
+                v = (1 - alpha) * v0 + alpha * v1
+
+            inposition.append(v)
+
+        pos_resampling.append(inposition)    
+        
+    return pos_resampling
+
+
 def convert_position(pose_3d):
     positions = []
     for pose in pose_3d:
@@ -564,11 +599,15 @@ def convert_position(pose_3d):
     return positions
     
 # 関節位置情報のリストからVMDを生成します
-def position_list_to_vmd_multi(positions_multi, positions_gan_multi, vmd_file, smoothed_file, bone_csv_file, depth_file, center_xy_scale, center_z_scale, xangle, mdecimation, idecimation, ddecimation, alignment, is_ik, heelpos, smooth_times):
+def position_list_to_vmd_multi(positions_multi, positions_gan_multi, vmd_file, smoothed_file, bone_csv_file, depth_file, center_xy_scale, center_z_scale, xangle, mdecimation, idecimation, ddecimation, alignment, is_ik, heelpos, smooth_times, original_fps):
     writer = VmdWriter()
 
     # 関節二次元情報を読み込み
     smoothed_2d = load_smoothed_2d(smoothed_file)
+
+    # フレームレートを30fpsに変換する(音ズレ対策)
+    if original_fps != 30.0:
+        smoothed_2d = convert_frame_rate(smoothed_2d, original_fps, 30.0)
 
     # 上半身2があるかチェック
     is_upper2_body = is_upper2_body_bone(bone_csv_file)
@@ -599,6 +638,11 @@ def position_list_to_vmd_multi(positions_multi, positions_gan_multi, vmd_file, s
 
     depth_all_frames = None
     if depths is not None:
+
+        # フレームレートを30fpsに変換する(音ズレ対策)
+        if original_fps != 30.0:
+            depths = convert_frame_rate(depths, original_fps, 30.0, is_depth=True)
+                    
         # 深度ファイルがある場合のみ、Z軸計算
         logger.info("センターZ計算開始")
 
@@ -2810,16 +2854,24 @@ def calc_triangle_area(a, b, c):
                     + ((b.y() - c.y()) * (c.x() - a.x())) ) / 2 )
     
 
-def position_multi_file_to_vmd(position_file, position_gan_file, vmd_file, smoothed_file, bone_csv_file, depth_file, center_xy_scale, center_z_scale, xangle, mdecimation, idecimation, ddecimation, alignment, is_ik, heelpos, smooth_times):
+def position_multi_file_to_vmd(position_file, position_gan_file, vmd_file, smoothed_file, bone_csv_file, depth_file, center_xy_scale, center_z_scale, xangle, mdecimation, idecimation, ddecimation, alignment, is_ik, heelpos, smooth_times, original_fps):
     positions_multi = read_positions_multi(position_file)
+
+    # フレームレートを30fpsに変換する(音ズレ対策)
+    if original_fps != 30.0:
+        positions_multi =  convert_frame_rate(positions_multi, original_fps, 30.0)
     
     # 3dpose-gan がない場合はNone
     if os.path.exists(position_gan_file):
         positions_gan_multi = read_positions_multi(position_gan_file)
+
+        # フレームレートを30fpsに変換する(音ズレ対策)
+        if original_fps != 30.0:
+            positions_gan_multi =  convert_frame_rate(positions_gan_multi, original_fps, 30.0)      
     else:
         positions_gan_multi = None
 
-    position_list_to_vmd_multi(positions_multi, positions_gan_multi, vmd_file, smoothed_file, bone_csv_file, depth_file, center_xy_scale, center_z_scale, xangle, mdecimation, idecimation, ddecimation, alignment, is_ik, heelpos, smooth_times)
+    position_list_to_vmd_multi(positions_multi, positions_gan_multi, vmd_file, smoothed_file, bone_csv_file, depth_file, center_xy_scale, center_z_scale, xangle, mdecimation, idecimation, ddecimation, alignment, is_ik, heelpos, smooth_times, original_fps)
     
 def make_showik_frames(is_ik):
     onoff = 1 if is_ik == True else 0
@@ -2902,6 +2954,9 @@ if __name__ == '__main__':
     parser.add_argument('-e', '--heel position', dest='heelpos', type=float,
                         default=0,
                         help='heel position correction')
+    parser.add_argument('-f', '--original-fps', dest='original_fps', type=float,
+                        default=30,
+                        help='original video fps')
     args = parser.parse_args()
 
     # resultディレクトリだけ指定させる
@@ -2956,4 +3011,4 @@ if __name__ == '__main__':
     # if os.path.exists('predictor/shape_predictor_68_face_landmarks.dat'):
     #     head_rotation = 
 
-    position_multi_file_to_vmd(position_file, position_gan_file, vmd_file, smoothed_file, args.bone, depth_file, args.centerxy, args.centerz, args.xangle, args.mdecimation, args.idecimation, args.ddecimation, is_alignment, is_ik, args.heelpos, args.smooth_times)
+    position_multi_file_to_vmd(position_file, position_gan_file, vmd_file, smoothed_file, args.bone, depth_file, args.centerxy, args.centerz, args.xangle, args.mdecimation, args.idecimation, args.ddecimation, is_alignment, is_ik, args.heelpos, args.smooth_times, args.original_fps)
